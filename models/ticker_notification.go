@@ -21,6 +21,8 @@ type TickerNotification struct {
 	MaxPrice        float64 `json:"max_price"`
 	MarkPrice       float64 `json:"mark_price"`
 	LastPrice       float64 `json:"last_price"`
+	UnderlyingPrice float64 `json:"underlying_price"`
+	UnderlyingIndex string  `json:"underlying_index"`
 	InstrumentName  string  `json:"instrument_name"`
 	IndexPrice      float64 `json:"index_price"`
 	Funding8H       float64 `json:"funding_8h"`

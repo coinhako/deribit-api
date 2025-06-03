@@ -265,7 +265,7 @@ func (c *Client) connect() (*websocket.Conn, *http.Response, error) {
 	// defer cancel()
 	conn, resp, err := websocket.Dial(ctx, c.addr, &websocket.DialOptions{})
 	if err == nil {
-		conn.SetReadLimit(32768 * 64)
+		conn.SetReadLimit(32768 * 64 * 16)
 	}
 	return conn, resp, err
 }

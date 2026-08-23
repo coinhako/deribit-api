@@ -52,11 +52,13 @@ type Client struct {
 	autoReconnect bool
 	debugMode     bool
 
-	conn        *websocket.Conn
-	rpcConn     *jsonrpc2.Conn
-	mu          sync.RWMutex
-	heartCancel chan struct{}
-	isConnected bool
+	conn         *websocket.Conn
+	rpcConn      *jsonrpc2.Conn
+	mu           sync.RWMutex
+	heartCancel  chan struct{}
+	heartStopped bool
+	isConnected  bool
+	closed       bool
 
 	auth struct {
 		token   string
@@ -150,7 +152,10 @@ func (c *Client) start() error {
 	c.subscriptions = make([]string, 0)
 	c.conn = nil
 	c.rpcConn = nil
+	c.mu.Lock()
 	c.heartCancel = make(chan struct{})
+	c.heartStopped = false
+	c.mu.Unlock()
 
 	for i := 0; i < MaxTryTimes; i++ {
 		conn, _, err := c.connect()
@@ -251,13 +256,66 @@ func (c *Client) reconnect() {
 	<-notify
 	c.setIsConnected(false)
 
+	// A disconnect caused by Close is deliberate: reconnecting would resurrect the very
+	// client the caller asked us to release.
+	if c.IsClosed() {
+		return
+	}
+
 	log.Println("disconnect, reconnect...")
 
-	close(c.heartCancel)
+	c.stopHeartbeat()
 
 	time.Sleep(1 * time.Second)
 
 	c.start()
+}
+
+// stopHeartbeat closes heartCancel at most once for the current connection. Both reconnect and
+// Close reach it, and closing an already-closed channel panics.
+func (c *Client) stopHeartbeat() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.heartCancel == nil || c.heartStopped {
+		return
+	}
+	close(c.heartCancel)
+	c.heartStopped = true
+}
+
+// IsClosed reports whether Close has been called.
+func (c *Client) IsClosed() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.closed
+}
+
+// Close releases the connection and stops the heartbeat goroutine that start launched. It is
+// safe to call more than once, and safe with AutoReconnect either enabled or disabled — a client
+// closed here is not reconnected.
+//
+// Without this a caller that replaces a Client cannot reclaim it: heartbeat exits only on
+// heartCancel, which is otherwise closed solely on the autoReconnect path, so an abandoned
+// client keeps calling Test every 3s and keeps decoding everything it is still subscribed to.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.isConnected = false
+	rpcConn := c.rpcConn
+	c.mu.Unlock()
+
+	c.stopHeartbeat()
+
+	if rpcConn == nil {
+		return nil
+	}
+	return rpcConn.Close()
 }
 
 func (c *Client) connect() (*websocket.Conn, *http.Response, error) {

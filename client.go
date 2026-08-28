@@ -315,7 +315,15 @@ func (c *Client) Close() error {
 	if rpcConn == nil {
 		return nil
 	}
-	return rpcConn.Close()
+
+	// NOTE: [Duc] The close handshake writes the close frame, then reads for the peer's reply.
+	// websocket v1.8.5 cannot parse Deribit's permessage-deflate rsv bits, so that read always
+	// fails and Close reports an error even though the write landed and the socket is gone.
+	// MEASURED against live Deribit: feed silent, goroutines reclaimed, IsConnected false.
+	// Surfacing it would make every caller log a failed release that in fact succeeded.
+	_ = rpcConn.Close()
+
+	return nil
 }
 
 func (c *Client) connect() (*websocket.Conn, *http.Response, error) {

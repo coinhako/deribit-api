@@ -169,3 +169,19 @@ func main() {
 }
 
 ```
+
+### Stop retrying a connection
+
+`New` retries a failed dial for good, and exits the process if it runs out of tries. Use `NewWithContext` when the
+caller must be able to give up. It stops retrying once the context ends and returns the context's error. The context
+bounds only the connection attempts, so the client keeps working after it ends.
+
+```
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+client, err := deribit.NewWithContext(ctx, cfg)
+if err != nil {
+	log.Printf("Deribit did not accept a connection within 30 s: %v", err)
+	return
+}
+```

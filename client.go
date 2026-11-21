@@ -72,11 +72,31 @@ type Client struct {
 }
 
 func New(cfg *Configuration) *Client {
+	client := clientFor(cfg)
+	err := client.start()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return client
+}
+
+// NewWithContext connects like New, but stops retrying once ctx ends and returns ctx's error,
+// where New retries for good and exits the process when it runs out of tries. ctx bounds only
+// the connection attempts: calls on the returned client use cfg.Ctx, as they do with New.
+func NewWithContext(ctx context.Context, cfg *Configuration) (*Client, error) {
+	client := clientFor(cfg)
+	if err := client.startContext(ctx); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func clientFor(cfg *Configuration) *Client {
 	ctx := cfg.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	client := &Client{
+	return &Client{
 		ctx:              ctx,
 		addr:             cfg.Addr,
 		apiKey:           cfg.ApiKey,
@@ -86,11 +106,6 @@ func New(cfg *Configuration) *Client {
 		subscriptionsMap: make(map[string]struct{}),
 		emitter:          emission.NewEmitter(),
 	}
-	err := client.start()
-	if err != nil {
-		log.Fatal(err)
-	}
-	return client
 }
 
 // setIsConnected sets state for isConnected
@@ -147,6 +162,10 @@ func (c *Client) subscribe(channels []string) {
 }
 
 func (c *Client) start() error {
+	return c.startContext(context.Background())
+}
+
+func (c *Client) startContext(ctx context.Context) error {
 	c.setIsConnected(false)
 	c.subscriptionsMap = make(map[string]struct{})
 	c.subscriptions = make([]string, 0)
@@ -158,12 +177,17 @@ func (c *Client) start() error {
 	c.mu.Unlock()
 
 	for i := 0; i < MaxTryTimes; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		conn, _, err := c.connect()
 		if err != nil {
 			log.Println(err)
 			tm := (i + 1) * 5
 			log.Printf("Sleep %vs", tm)
-			time.Sleep(time.Duration(tm) * time.Second)
+			if err := sleepUnlessDone(ctx, time.Duration(tm)*time.Second); err != nil {
+				return err
+			}
 			continue
 		}
 		c.conn = conn
@@ -171,6 +195,12 @@ func (c *Client) start() error {
 	}
 	if c.conn == nil {
 		return errors.New("connect fail")
+	}
+	if err := ctx.Err(); err != nil {
+		// NOTE: [Duc] Close waits for the peer's close frame. The caller has given up, so it must
+		// not wait for that too.
+		go c.conn.Close(websocket.StatusNormalClosure, "")
+		return err
 	}
 
 	c.rpcConn = jsonrpc2.NewConn(context.Background(), NewObjectStream(c.conn), c)
@@ -324,6 +354,17 @@ func (c *Client) Close() error {
 	_ = rpcConn.Close()
 
 	return nil
+}
+
+func sleepUnlessDone(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) connect() (*websocket.Conn, *http.Response, error) {

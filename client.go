@@ -200,7 +200,6 @@ func (c *Client) startContext(ctx context.Context) error {
 		// NOTE: [Duc] Close waits for the peer's close frame. The caller has given up, so it must
 		// not wait for that too.
 		go c.conn.Close(websocket.StatusNormalClosure, "")
-		c.conn = nil
 		return err
 	}
 

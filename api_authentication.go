@@ -1,15 +1,23 @@
 package deribit
 
-import "github.com/coinhako/deribit-api/models"
+import (
+	"context"
+
+	"github.com/coinhako/deribit-api/models"
+)
 
 func (c *Client) Auth(apiKey string, secretKey string) (err error) {
+	return c.authenticate(c.ctx, apiKey, secretKey)
+}
+
+func (c *Client) authenticate(ctx context.Context, apiKey string, secretKey string) (err error) {
 	params := models.ClientCredentialsParams{
 		GrantType:    "client_credentials",
 		ClientID:     apiKey,
 		ClientSecret: secretKey,
 	}
 	var result models.AuthResponse
-	err = c.Call("public/auth", params, &result)
+	err = c.call(ctx, "public/auth", params, &result)
 	if err != nil {
 		return
 	}

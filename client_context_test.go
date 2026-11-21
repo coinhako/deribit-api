@@ -30,14 +30,16 @@ func refusingDeribit(dials *int32) *httptest.Server {
 	}))
 }
 
-// answeringDeribit accepts the WebSocket after handshakeDelay and answers every JSON-RPC call.
-func answeringDeribit(handshakeDelay time.Duration) *httptest.Server {
+// fakeDeribit accepts the WebSocket after handshakeDelay and answers every JSON-RPC call, or none when silent. It
+// closes hungUp once the client closes the connection.
+func fakeDeribit(handshakeDelay time.Duration, silent bool, hungUp chan struct{}) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(handshakeDelay)
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}
+		defer close(hungUp)
 		defer conn.Close(websocket.StatusNormalClosure, "")
 		for {
 			var call struct {
@@ -46,6 +48,9 @@ func answeringDeribit(handshakeDelay time.Duration) *httptest.Server {
 			}
 			if err := wsjson.Read(context.Background(), conn, &call); err != nil {
 				return
+			}
+			if silent {
+				continue
 			}
 			var result interface{} = "ok"
 			if call.Method == "public/test" {
@@ -57,6 +62,15 @@ func answeringDeribit(handshakeDelay time.Duration) *httptest.Server {
 			}
 		}
 	}))
+}
+
+func requireHungUp(t *testing.T, hungUp chan struct{}) {
+	t.Helper()
+	select {
+	case <-hungUp:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client kept the connection open after its context ended")
+	}
 }
 
 func TestNewWithContextStopsDialingWhenTheContextEnds(t *testing.T) {
@@ -90,7 +104,7 @@ func TestNewWithContextDoesNotDialWithAContextThatAlreadyEnded(t *testing.T) {
 }
 
 func TestNewWithContextReturnsAClientThatOutlivesTheContext(t *testing.T) {
-	srv := answeringDeribit(0)
+	srv := fakeDeribit(0, false, make(chan struct{}))
 	defer srv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -105,7 +119,8 @@ func TestNewWithContextReturnsAClientThatOutlivesTheContext(t *testing.T) {
 }
 
 func TestNewWithContextDropsAConnectionThatLandsAfterTheContextEnds(t *testing.T) {
-	srv := answeringDeribit(300 * time.Millisecond)
+	hungUp := make(chan struct{})
+	srv := fakeDeribit(300*time.Millisecond, false, hungUp)
 	defer srv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
@@ -114,4 +129,39 @@ func TestNewWithContextDropsAConnectionThatLandsAfterTheContextEnds(t *testing.T
 
 	assert.Nil(t, client)
 	assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
+	requireHungUp(t, hungUp)
+}
+
+func TestNewWithContextStopsWaitingForASilentServerWhenTheContextEnds(t *testing.T) {
+	for _, keys := range []struct{ name, apiKey, secretKey string }{
+		{"without credentials", "", ""},
+		{"with credentials", "key", "secret"},
+	} {
+		t.Run(keys.name, func(t *testing.T) {
+			hungUp := make(chan struct{})
+			srv := fakeDeribit(0, true, hungUp)
+			defer srv.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(200*time.Millisecond, cancel)
+
+			type outcome struct {
+				client *Client
+				err    error
+			}
+			returned := make(chan outcome, 1)
+			go func() {
+				client, err := NewWithContext(ctx, &Configuration{Addr: wsURL(srv), ApiKey: keys.apiKey, SecretKey: keys.secretKey})
+				returned <- outcome{client, err}
+			}()
+
+			select {
+			case got := <-returned:
+				assert.Nil(t, got.client)
+				assert.True(t, errors.Is(got.err, context.Canceled), "got %v", got.err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("NewWithContext still waited for the silent server 3 s after its context ended")
+			}
+			requireHungUp(t, hungUp)
+		})
+	}
 }

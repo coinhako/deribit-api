@@ -1,11 +1,17 @@
 package deribit
 
 import (
+	"context"
+
 	"github.com/coinhako/deribit-api/models"
 )
 
 func (c *Client) SetHeartbeat(params *models.SetHeartbeatParams) (result string, err error) {
-	err = c.Call("public/set_heartbeat", params, &result)
+	return c.setHeartbeat(c.ctx, params)
+}
+
+func (c *Client) setHeartbeat(ctx context.Context, params *models.SetHeartbeatParams) (result string, err error) {
+	err = c.call(ctx, "public/set_heartbeat", params, &result)
 	return
 }
 

@@ -82,7 +82,8 @@ func New(cfg *Configuration) *Client {
 
 // NewWithContext connects like New, but stops retrying once ctx ends and returns ctx's error,
 // where New retries for good and exits the process when it runs out of tries. ctx bounds only
-// the connection attempts: calls on the returned client use cfg.Ctx, as they do with New.
+// connecting, including the auth and heartbeat setup: calls on the returned client use cfg.Ctx,
+// as they do with New.
 func NewWithContext(ctx context.Context, cfg *Configuration) (*Client, error) {
 	client := clientFor(cfg)
 	if err := client.startContext(ctx); err != nil {
@@ -196,12 +197,6 @@ func (c *Client) startContext(ctx context.Context) error {
 	if c.conn == nil {
 		return errors.New("connect fail")
 	}
-	if err := ctx.Err(); err != nil {
-		// NOTE: [Duc] Close waits for the peer's close frame. The caller has given up, so it must
-		// not wait for that too.
-		go c.conn.Close(websocket.StatusNormalClosure, "")
-		return err
-	}
 
 	c.rpcConn = jsonrpc2.NewConn(context.Background(), NewObjectStream(c.conn), c)
 
@@ -209,7 +204,7 @@ func (c *Client) startContext(ctx context.Context) error {
 
 	// auth
 	if c.apiKey != "" && c.secretKey != "" {
-		if err := c.Auth(c.apiKey, c.secretKey); err != nil {
+		if err := c.authenticate(ctx, c.apiKey, c.secretKey); err != nil {
 			log.Printf("auth error: %v", err)
 		}
 	}
@@ -217,7 +212,14 @@ func (c *Client) startContext(ctx context.Context) error {
 	// subscribe
 	c.subscribe(c.subscriptions)
 
-	c.SetHeartbeat(&models.SetHeartbeatParams{Interval: 30})
+	c.setHeartbeat(ctx, &models.SetHeartbeatParams{Interval: 30})
+
+	if err := ctx.Err(); err != nil {
+		// NOTE: [Duc] Close waits for the peer's close frame. The caller has given up, so it must
+		// not wait for that too.
+		go c.rpcConn.Close()
+		return err
+	}
 
 	if c.autoReconnect {
 		go c.reconnect()
@@ -230,6 +232,10 @@ func (c *Client) startContext(ctx context.Context) error {
 
 // Call issues JSONRPC v2 calls
 func (c *Client) Call(method string, params interface{}, result interface{}) (err error) {
+	return c.call(c.ctx, method, params, result)
+}
+
+func (c *Client) call(ctx context.Context, method string, params interface{}, result interface{}) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New(fmt.Sprintf("%v", r))
@@ -250,7 +256,7 @@ func (c *Client) Call(method string, params interface{}, result interface{}) (er
 		token.setToken(c.auth.token)
 	}
 
-	return c.rpcConn.Call(c.ctx, method, params, result)
+	return c.rpcConn.Call(ctx, method, params, result)
 }
 
 // Handle implements jsonrpc2.Handler
